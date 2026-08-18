@@ -1,0 +1,11 @@
+# user files being shared — never commit these
+shared/*
+!shared/.gitkeep
+
+# build output
+clients/mac/FTransfer.app/
+
+# local tooling & OS noise
+.claude/
+.DS_Store
+*.log
