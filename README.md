@@ -139,6 +139,10 @@ packaged binary before declaring success. Publish by committing the zip to the
 `dist` branch (served from `raw.githubusercontent.com`, which stays reachable
 on networks that block GitHub's release-asset host).
 
+If a `cloudflared` architecture can't be downloaded on your network, the script
+warns and ships without it — grab the artifact from CI's **Universal release
+build** job instead, which always has both.
+
 ## How it works
 
 ```mermaid

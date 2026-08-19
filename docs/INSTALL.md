@@ -70,8 +70,7 @@ folder. Sharing a folder elsewhere in your home directory avoids it entirely.
 ## Requirements
 
 - macOS 12 (Monterey) or newer
-- Apple Silicon Mac (M1 or newer). On an Intel Mac the app opens but needs
-  `cloudflared` installed separately — ask Sagnik for an Intel build.
+- Any Mac — the app is universal, so Apple Silicon and Intel both work
 
 ## Uninstall
 

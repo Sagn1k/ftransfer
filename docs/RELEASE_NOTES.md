@@ -47,9 +47,8 @@ elsewhere in your home directory avoids even that.
 
 ## Requirements
 
-macOS 12+. The app binary is universal (Apple Silicon + Intel); the bundled
-tunnel binary in this build is Apple Silicon only, so Intel Macs additionally
-need `brew install cloudflared`.
+macOS 12 or newer, Apple Silicon or Intel — both the app and the bundled
+tunnel binary are universal.
 
 ## Verifying this build
 
