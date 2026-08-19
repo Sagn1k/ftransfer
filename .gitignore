@@ -4,6 +4,9 @@ shared/*
 
 # build output
 clients/mac/FTransfer.app/
+clients/mac/build/
+clients/mac/vendor/
+dist/
 
 # local tooling & OS noise
 .claude/

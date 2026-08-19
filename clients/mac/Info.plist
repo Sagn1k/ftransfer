@@ -26,5 +26,15 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT License</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>FTransfer needs access to share files from your Desktop with your phone.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>FTransfer needs access to share files from your Documents folder with your phone.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>FTransfer needs access to share files from your Downloads folder with your phone.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>FTransfer needs access to share files from removable drives with your phone.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>FTransfer needs access to share files from network drives with your phone.</string>
 </dict>
 </plist>

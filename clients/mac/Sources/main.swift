@@ -77,7 +77,7 @@ private final class ShareSession {
     var url: String?
     var registered = false
     var stopRequested = false
-    var serverProcess: Process?
+    var server: FileServer?
     var tunnelProcess: Process?
     var logTail: [String] = []
 
@@ -99,9 +99,9 @@ private final class ShareSession {
 
     func terminateProcesses() {
         stopRequested = true
-        for p in [serverProcess, tunnelProcess] where p?.isRunning == true {
-            p?.terminate()
-        }
+        server?.stop()
+        server = nil
+        if tunnelProcess?.isRunning == true { tunnelProcess?.terminate() }
     }
 }
 
@@ -313,13 +313,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startSharing(folders: [URL]) {
         guard state == .idle else { return }
-        guard let serverScript = Bundle.main.path(forResource: "server", ofType: "py") else {
-            alert("Missing server.py", "The app bundle is incomplete — rebuild with build.sh.")
-            return
-        }
         guard let cloudflared = findCloudflared() else {
             alert("cloudflared not found",
-                  "Install it first:\n\nbrew install cloudflared")
+                  "This copy of FTransfer has no bundled tunnel binary. Either reinstall "
+                  + "the release build, or install it yourself:\n\nbrew install cloudflared")
             return
         }
 
@@ -329,22 +326,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildUI()
         showConnectingWindow()
 
-        let server = Process()
-        server.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        server.arguments = [serverScript] + folders.map(\.path)
-                         + ["--port", "0", "--password", s.password]
-        attach(process: server, to: s, tag: "server") { [weak self] line in
-            if s.port == nil,
-               let portText = firstMatch(#"listening http://[0-9.]+:([0-9]+)"#, in: line),
-               let colon = portText.lastIndex(of: ":"),
-               let port = Int(portText[portText.index(after: colon)...]) {
-                s.port = port
-                self?.launchTunnel(for: s, cloudflared: cloudflared, port: port)
-            }
-        }
+        // The server runs in-process: no python3, so no Xcode Command Line
+        // Tools and no admin rights needed on the machine running this.
+        let server = FileServer(folders: folders, password: s.password)
         do {
-            try server.run()
-            s.serverProcess = server
+            let port = Int(try server.start())
+            s.server = server
+            s.port = port
+            launchTunnel(for: s, cloudflared: cloudflared, port: port)
         } catch {
             fail(s, "Could not start the local server", detail: error.localizedDescription)
             return
@@ -429,7 +418,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func findCloudflared() -> String? {
-        var candidates = ["/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared"]
+        // Bundled copy first — that's what makes the release build self-contained.
+        var candidates: [String] = []
+        if let bundled = Bundle.main.path(forResource: "cloudflared", ofType: nil) {
+            candidates.append(bundled)
+        }
+        candidates += ["/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared"]
         if let path = ProcessInfo.processInfo.environment["PATH"] {
             candidates += path.split(separator: ":").map { "\($0)/cloudflared" }
         }
@@ -635,6 +629,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 // MARK: - Entry point
+
+// FT_SERVE_ONLY=1 <folder…>: run just the HTTP server and print its port, with
+// no UI. Used by tests/parity.sh to diff this server against server.py.
+if ProcessInfo.processInfo.environment["FT_SERVE_ONLY"] != nil {
+    let folders = CommandLine.arguments.dropFirst().map { URL(fileURLWithPath: $0) }
+    let password = ProcessInfo.processInfo.environment["FT_PASSWORD"] ?? "test"
+    let onlyServer = FileServer(folders: Array(folders), password: password)
+    do {
+        let port = try onlyServer.start()
+        print("listening http://127.0.0.1:\(port)  password: \(password)")
+        fflush(stdout)
+    } catch {
+        FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+        exit(1)
+    }
+    RunLoop.main.run()
+    exit(0)
+}
 
 let app = NSApplication.shared
 let delegate = AppDelegate()

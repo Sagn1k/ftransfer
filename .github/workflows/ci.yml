@@ -13,10 +13,26 @@ jobs:
       - name: Run smoke tests
         run: tests/smoke.sh
 
-  build-app:
-    name: Build macOS menu bar app
+  app:
+    name: Build app + server parity
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build FTransfer.app
         run: clients/mac/build.sh
+      - name: Python vs Swift server parity
+        run: tests/parity.sh
+      - name: Smoke tests on macOS
+        run: tests/smoke.sh
+
+  universal:
+    name: Universal release build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build distributable zip
+        run: scripts/release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FTransfer-macos
+          path: dist/FTransfer-macos.zip

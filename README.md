@@ -24,8 +24,9 @@ browser — no app to install, no accounts, no same-network requirement.
   grab them as one .zip, or **Download all** for the entire share
 - **Password-protected** — HTTPS + Basic Auth with a new random password per run
 - **Download-only** — nothing on the Mac can be modified from the phone
-- **Zero dependencies** — the server is a single stdlib-only Python file;
-  the only external tool is `cloudflared`
+- **Zero dependencies, no admin rights** — the distributed app bundles
+  everything (see [Give it to your team](#give-it-to-your-team)); the CLI is a
+  single stdlib-only Python file plus `cloudflared`
 - **Mobile-friendly UI** — file icons, sizes, previews, one-tap downloads,
   dark mode
 
@@ -90,10 +91,53 @@ stop sharing. Re-opening the app from Finder also brings the window back.
 > On MacBooks with a notch, a crowded menu bar can hide new icons — if you
 > don't see 📦, close some other menu bar apps or use the app's windows.
 
-The app is built locally and unsigned — that's why there's no prebuilt
-download.
-
 <br clear="right">
+
+## Give it to your team
+
+Coworkers install with one Terminal line — **no admin rights, no Homebrew, no
+Python, no Xcode, no Apple ID**:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Sagn1k/ftransfer/dist/FTransfer-macos.zip -o /tmp/ftransfer.zip && rm -rf ~/Applications/FTransfer.app && mkdir -p ~/Applications && ditto -xk /tmp/ftransfer.zip ~/Applications && rm /tmp/ftransfer.zip && open ~/Applications/FTransfer.app
+```
+
+Hand them [docs/INSTALL.md](docs/INSTALL.md) — it covers the whole flow in
+plain language.
+
+### Why this avoids the "unidentified developer" wall
+
+macOS only blocks apps carrying a **quarantine** flag, which browsers, Slack,
+and Mail attach to their downloads. `curl` doesn't set it, so the identical app
+opens with no warning. Verified both ways: the curl-delivered copy launches
+cleanly, and the same bundle with a quarantine flag is `rejected` by
+Gatekeeper. Signing and notarizing (a paid Apple Developer account) is only
+needed if you want *browser* downloads to open cleanly.
+
+The app is deliberately **self-contained**, which is what removes the admin
+requirement — `/usr/bin/python3`, `git`, `make`, and `swiftc` are all Xcode
+Command Line Tools stubs that pop an admin-gated installer, so the app touches
+none of them:
+
+- the HTTP server is a Swift port compiled into the app (the CLI's `server.py`
+  isn't used by it)
+- `cloudflared` ships inside the app bundle
+- it installs to `~/Applications`, which needs no elevation
+
+The one prompt that remains on any path is macOS's normal privacy request the
+first time the app reads `Desktop`, `Documents`, or `Downloads`. Sharing a
+folder elsewhere in your home directory avoids even that.
+
+### Cutting a new build
+
+```sh
+scripts/release.sh          # universal app + bundled tunnel → dist/FTransfer-macos.zip
+```
+
+It verifies architectures, the signature, and actually serves a file from the
+packaged binary before declaring success. Publish by committing the zip to the
+`dist` branch (served from `raw.githubusercontent.com`, which stays reachable
+on networks that block GitHub's release-asset host).
 
 ## How it works
 
@@ -137,18 +181,31 @@ machines and networks.
 ## Development
 
 ```
-server.py            the whole server (stdlib only)
-start.sh             CLI launcher: server + tunnel + QR
-clients/mac/         Swift menu bar app (build.sh → FTransfer.app)
-tests/smoke.sh       black-box tests: auth, ranges, traversal, listings
-.github/workflows/   CI: smoke tests on Linux, app build on macOS
+server.py                     CLI server (stdlib only, one file)
+start.sh                      CLI launcher: server + tunnel + QR
+clients/mac/Sources/
+  main.swift                  menu bar app: folder picker, QR window, tunnel
+  FileServer.swift            Swift port of server.py (in-process, no Python)
+  Zip.swift                   streaming zip writer (store-only, zip64)
+clients/mac/build.sh          → FTransfer.app  (--universal for releases)
+scripts/release.sh            → dist/FTransfer-macos.zip (self-contained)
+tests/smoke.sh                black-box tests: auth, ranges, traversal, zips
+tests/parity.sh               proves both servers behave identically
+docs/INSTALL.md               the page to hand coworkers
 ```
 
 ```sh
-make test            # run the smoke tests
+make test            # smoke tests (Python server)
+make parity          # diff the Python and Swift servers
 make app             # build the menu bar app
+make release         # build the distributable zip
 make start           # share ./shared
 ```
+
+Two server implementations could drift, so `tests/parity.sh` runs both over
+the same fixture tree and requires **byte-identical HTML**, matching status
+codes and range bytes, and zip archives with the same entries — a UI tweak in
+one without the other fails CI.
 
 ## License
 

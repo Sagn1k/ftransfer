@@ -1,0 +1,16 @@
+ftransfer
+Copyright (c) 2026 Sagnik Bhowmick
+Licensed under the MIT License (see LICENSE).
+
+--------------------------------------------------------------------------------
+
+Distributed release builds of FTransfer.app bundle the `cloudflared` binary
+from Cloudflare, Inc., which is licensed under the Apache License 2.0:
+
+    https://github.com/cloudflare/cloudflared
+
+A copy of that licence ships inside the app bundle at
+`FTransfer.app/Contents/Resources/cloudflared-LICENSE`, and is fetched by
+`scripts/release.sh` at build time.
+
+cloudflared is used unmodified, as a separate executable invoked by the app.
