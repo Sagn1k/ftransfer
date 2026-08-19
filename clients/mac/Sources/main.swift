@@ -23,19 +23,38 @@ private func firstMatch(_ pattern: String, in text: String) -> String? {
     return String(text[r])
 }
 
+/// QR code with a small 📦 badge in the middle. Correction level H tolerates
+/// the badge covering the center modules.
 private func qrImage(for string: String, sideLength: CGFloat) -> NSImage? {
     guard let data = string.data(using: .ascii),
           let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
     filter.setValue(data, forKey: "inputMessage")
-    filter.setValue("M", forKey: "inputCorrectionLevel")
+    filter.setValue("H", forKey: "inputCorrectionLevel")
     guard let output = filter.outputImage else { return nil }
     let scale = sideLength / output.extent.width
     let scaled = output.samplingNearest()
         .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
     let rep = NSCIImageRep(ciImage: scaled)
-    let image = NSImage(size: rep.size)
-    image.addRepresentation(rep)
-    return image
+    let plain = NSImage(size: rep.size)
+    plain.addRepresentation(rep)
+
+    return NSImage(size: rep.size, flipped: false) { rect in
+        plain.draw(in: rect)
+        let badgeSide = rect.width * 0.17
+        let badge = NSRect(x: rect.midX - badgeSide / 2, y: rect.midY - badgeSide / 2,
+                           width: badgeSide, height: badgeSide)
+        NSColor.white.setFill()
+        NSBezierPath(roundedRect: badge, xRadius: badgeSide * 0.24,
+                     yRadius: badgeSide * 0.24).fill()
+        let emoji = "📦" as NSString
+        let attrs: [NSAttributedString.Key: Any] =
+            [.font: NSFont.systemFont(ofSize: badgeSide * 0.58)]
+        let textSize = emoji.size(withAttributes: attrs)
+        emoji.draw(at: NSPoint(x: rect.midX - textSize.width / 2,
+                               y: rect.midY - textSize.height / 2),
+                   withAttributes: attrs)
+        return true
+    }
 }
 
 /// Accumulates pipe chunks and hands back whole lines.
@@ -69,6 +88,10 @@ private final class ShareSession {
                            : "\(folders.count) folders"
     }
 
+    var folderNames: String {
+        folders.map(\.lastPathComponent).joined(separator: ", ")
+    }
+
     func remember(_ line: String) {
         logTail.append(line)
         if logTail.count > 30 { logTail.removeFirst() }
@@ -90,13 +113,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var state: State = .idle
     private var session: ShareSession?
-    private var qrWindow: NSWindow?
+    private var shareWindow: NSWindow?
 
     private let lastFolderKey = "lastSharedFolder"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         rebuildUI()
+        // FT_PREVIEW=1: render the QR window with fake data (UI development).
+        if ProcessInfo.processInfo.environment["FT_PREVIEW"] != nil {
+            let s = ShareSession(folders: [
+                URL(fileURLWithPath: NSHomeDirectory() + "/Documents"),
+                URL(fileURLWithPath: NSHomeDirectory() + "/Downloads"),
+            ])
+            s.url = "https://impacts-leaves-shipping-pst.trycloudflare.com"
+            session = s
+            state = .live
+            rebuildUI()
+            showQRWindow()
+            if let n = shareWindow?.windowNumber {
+                FileHandle.standardOutput.write(Data("FT_PREVIEW_WINDOW \(n)\n".utf8))
+            }
+            // FT_PREVIEW_OUT=/path.png: render the window content to a PNG
+            // (self-render, needs no screen-recording permission) and exit.
+            if let out = ProcessInfo.processInfo.environment["FT_PREVIEW_OUT"] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    if let view = self?.shareWindow?.contentView {
+                        view.layoutSubtreeIfNeeded()
+                        if let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                            view.cacheDisplay(in: view.bounds, to: rep)
+                            if let png = rep.representation(using: .png, properties: [:]) {
+                                try? png.write(to: URL(fileURLWithPath: out))
+                            }
+                        }
+                    }
+                    NSApp.terminate(nil)
+                }
+            }
+            return
+        }
         // Go straight into the flow the user expects: pick folders, get a QR.
         DispatchQueue.main.async { [weak self] in
             self?.chooseFoldersAndStart(fromLaunch: true)
@@ -109,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch state {
         case .live: showQRWindow()
         case .idle: chooseFoldersAndStart(fromLaunch: false)
-        case .starting: break
+        case .starting: shareWindow?.makeKeyAndOrderFront(nil)
         }
         return true
     }
@@ -118,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session?.terminateProcesses()
     }
 
-    // MARK: UI
+    // MARK: Menu bar
 
     private func rebuildUI() {
         let symbol = state == .live ? "shippingbox.fill" : "shippingbox"
@@ -207,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session?.terminateProcesses()
         session = nil
         state = .idle
-        qrWindow?.close()
+        shareWindow?.close()
         rebuildUI()
     }
 
@@ -221,6 +276,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let s = session else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(s.password, forType: .string)
+    }
+
+    @objc private func copyLinkTapped(_ sender: NSButton) {
+        copyLink()
+        flashCopied(sender)
+    }
+
+    @objc private func copyPasswordTapped(_ sender: NSButton) {
+        copyPassword()
+        flashCopied(sender)
+    }
+
+    private func flashCopied(_ button: NSButton) {
+        let original = button.image
+        button.image = NSImage(systemSymbolName: "checkmark",
+                               accessibilityDescription: "Copied")
+        button.contentTintColor = .systemGreen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak button] in
+            button?.image = original
+            button?.contentTintColor = .secondaryLabelColor
+        }
     }
 
     @objc private func openFolders() {
@@ -251,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session = s
         state = .starting
         rebuildUI()
+        showConnectingWindow()
 
         let server = Process()
         server.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
@@ -346,6 +423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         s.terminateProcesses()
         session = nil
         state = .idle
+        shareWindow?.close()
         rebuildUI()
         alert(title, detail)
     }
@@ -366,65 +444,193 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         a.runModal()
     }
 
-    // MARK: QR window
+    // MARK: Share window (connecting + QR)
 
-    @objc private func showQRWindow() {
-        guard let s = session, let url = s.url else { return }
-        qrWindow?.close()
-
-        let qr = NSImageView()
-        qr.image = qrImage(for: url, sideLength: 260)
-        qr.translatesAutoresizingMaskIntoConstraints = false
-        qr.widthAnchor.constraint(equalToConstant: 260).isActive = true
-        qr.heightAnchor.constraint(equalToConstant: 260).isActive = true
-
-        let urlField = selectableLabel(url, size: 13, weight: .semibold)
-        let pwField = selectableLabel("Password: \(s.password)", size: 13, weight: .regular)
-        let foldersField = selectableLabel(
-            "Sharing: " + s.folders.map(\.lastPathComponent).joined(separator: ", "),
-            size: 11, weight: .regular)
-        foldersField.textColor = .secondaryLabelColor
-        let hint = selectableLabel("Scan with the phone camera, sign in with any username.",
-                                   size: 11, weight: .regular)
-        hint.textColor = .secondaryLabelColor
-
-        let copyButton = NSButton(title: "Copy Link", target: self, action: #selector(copyLink))
-        copyButton.bezelStyle = .rounded
-        let stopButton = NSButton(title: "Stop Sharing", target: self, action: #selector(stopSharing))
-        stopButton.bezelStyle = .rounded
-        let buttons = NSStackView(views: [copyButton, stopButton])
-        buttons.orientation = .horizontal
-        buttons.spacing = 10
-
-        let stack = NSStackView(views: [qr, urlField, pwField, foldersField, hint, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
-
-        let window = NSWindow(contentRect: .zero,
-                              styleMask: [.titled, .closable],
+    private func presentShareWindow(_ content: NSView) {
+        let window: NSWindow
+        if let existing = shareWindow {
+            window = existing
+        } else {
+            window = NSWindow(contentRect: .zero,
+                              styleMask: [.titled, .closable, .fullSizeContentView],
                               backing: .buffered, defer: false)
-        window.title = "ftransfer — scan on your phone"
-        window.contentView = stack
-        window.isReleasedWhenClosed = false
-        window.level = .floating
-        window.setContentSize(stack.fittingSize)
-        window.center()
-        qrWindow = window
-
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.isReleasedWhenClosed = false
+            window.level = .floating
+            shareWindow = window
+        }
+        window.title = "ftransfer"
+        window.contentView = content
+        window.setContentSize(content.fittingSize)
+        if !window.isVisible { window.center() }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func selectableLabel(_ text: String, size: CGFloat,
-                                 weight: NSFont.Weight) -> NSTextField {
+    private func showConnectingWindow() {
+        guard let s = session else { return }
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.isIndeterminate = true
+        spinner.startAnimation(nil)
+
+        let title = label("Starting secure tunnel…", size: 15, weight: .semibold)
+        let sub = label("Sharing \(s.folderNames)", size: 12, weight: .regular,
+                        color: .secondaryLabelColor)
+        sub.lineBreakMode = .byTruncatingMiddle
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(stopSharing))
+        cancel.bezelStyle = .rounded
+
+        let stack = NSStackView(views: [spinner, title, sub, cancel])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.setCustomSpacing(18, after: sub)
+        stack.edgeInsets = NSEdgeInsets(top: 44, left: 60, bottom: 26, right: 60)
+
+        presentShareWindow(stack)
+    }
+
+    @objc private func showQRWindow() {
+        guard let s = session, let url = s.url else { return }
+
+        // --- header: live status ------------------------------------------
+        let dot = NSImageView(image: NSImage(systemSymbolName: "circle.fill",
+                                             accessibilityDescription: "live")!)
+        dot.contentTintColor = .systemGreen
+        dot.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+
+        let headline = label("Ready — scan with your phone", size: 16, weight: .bold)
+        let header = NSStackView(views: [dot, headline])
+        header.orientation = .horizontal
+        header.spacing = 7
+
+        let folders = label("Sharing \(s.folderNames)", size: 12, weight: .regular,
+                            color: .secondaryLabelColor)
+        folders.lineBreakMode = .byTruncatingMiddle
+
+        // --- QR on a white card (scans well in dark mode too) --------------
+        let qr = NSImageView()
+        qr.image = qrImage(for: url, sideLength: 480)  // rendered @2x, shown at 240
+        qr.imageScaling = .scaleProportionallyUpOrDown
+        qr.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        qr.heightAnchor.constraint(equalToConstant: 240).isActive = true
+
+        let card = NSStackView(views: [qr])
+        card.orientation = .vertical
+        card.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        card.wantsLayer = true
+        card.layer?.backgroundColor = NSColor.white.cgColor
+        card.layer?.cornerRadius = 18
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.22
+        card.layer?.shadowRadius = 14
+        card.layer?.shadowOffset = CGSize(width: 0, height: -3)
+
+        // --- link row -------------------------------------------------------
+        let linkText = label(url.replacingOccurrences(of: "https://", with: ""),
+                             size: 13, weight: .medium)
+        linkText.lineBreakMode = .byTruncatingMiddle
+        let linkRow = capsule(views: [linkText,
+                                      iconButton("doc.on.doc", #selector(copyLinkTapped(_:)),
+                                                 help: "Copy link")])
+
+        // --- password row ----------------------------------------------------
+        let pwTitle = label("PASSWORD", size: 10, weight: .semibold,
+                            color: .secondaryLabelColor)
+        let pwValue = NSTextField(labelWithString: "")
+        pwValue.isSelectable = true
+        pwValue.attributedStringValue = NSAttributedString(
+            string: s.password,
+            attributes: [.font: NSFont.monospacedSystemFont(ofSize: 22, weight: .semibold),
+                         .kern: 2.5])
+        let pwText = NSStackView(views: [pwTitle, pwValue])
+        pwText.orientation = .vertical
+        pwText.alignment = .leading
+        pwText.spacing = 1
+        let pwRow = capsule(views: [pwText,
+                                    iconButton("doc.on.doc", #selector(copyPasswordTapped(_:)),
+                                               help: "Copy password")],
+                            height: 58)
+
+        let hint = label("Any username works — just enter the password.",
+                         size: 11, weight: .regular, color: .tertiaryLabelColor)
+
+        // --- buttons ---------------------------------------------------------
+        let openBtn = NSButton(title: "Open Folder", target: self, action: #selector(openFolders))
+        openBtn.bezelStyle = .rounded
+        let stopBtn = NSButton(title: "Stop Sharing", target: self, action: #selector(stopSharing))
+        stopBtn.bezelStyle = .rounded
+        stopBtn.hasDestructiveAction = true
+        let buttons = NSStackView(views: [openBtn, stopBtn])
+        buttons.orientation = .horizontal
+        buttons.spacing = 10
+
+        // --- assemble --------------------------------------------------------
+        let stack = NSStackView(views: [header, folders, card, linkRow, pwRow, hint, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 10
+        stack.setCustomSpacing(4, after: header)
+        stack.setCustomSpacing(16, after: folders)
+        stack.setCustomSpacing(16, after: card)
+        stack.setCustomSpacing(14, after: hint)
+        stack.edgeInsets = NSEdgeInsets(top: 40, left: 30, bottom: 22, right: 30)
+
+        for row in [linkRow, pwRow] {
+            row.widthAnchor.constraint(equalTo: card.widthAnchor).isActive = true
+        }
+
+        presentShareWindow(stack)
+    }
+
+    // MARK: small view builders
+
+    private func label(_ text: String, size: CGFloat, weight: NSFont.Weight,
+                       color: NSColor = .labelColor) -> NSTextField {
         let f = NSTextField(labelWithString: text)
         f.isSelectable = true
         f.font = .systemFont(ofSize: size, weight: weight)
-        f.lineBreakMode = .byTruncatingMiddle
+        f.textColor = color
         f.maximumNumberOfLines = 1
         return f
+    }
+
+    private func capsule(views: [NSView], height: CGFloat = 38) -> NSStackView {
+        var arranged = views
+        if arranged.count >= 2 {
+            // flexible spacer so the trailing button hugs the right edge
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+            arranged.insert(spacer, at: arranged.count - 1)
+        }
+        let row = NSStackView(views: arranged)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.edgeInsets = NSEdgeInsets(top: 6, left: 14, bottom: 6, right: 10)
+        row.wantsLayer = true
+        row.layer?.backgroundColor = NSColor.gray.withAlphaComponent(0.14).cgColor
+        row.layer?.cornerRadius = 12
+        row.heightAnchor.constraint(equalToConstant: height).isActive = true
+        return row
+    }
+
+    private func iconButton(_ symbol: String, _ action: Selector, help: String) -> NSButton {
+        let b = NSButton(image: NSImage(systemSymbolName: symbol,
+                                        accessibilityDescription: help)!,
+                         target: self, action: action)
+        b.isBordered = false
+        b.bezelStyle = .regularSquare
+        b.contentTintColor = .secondaryLabelColor
+        b.toolTip = help
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        return b
     }
 }
 

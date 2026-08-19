@@ -67,6 +67,8 @@ Install `qrencode` (`brew install qrencode`) to get the terminal QR code.
 
 ## Menu bar app
 
+<img align="right" src="docs/app-window.png" width="270" alt="FTransfer QR window">
+
 A native macOS menu bar app wraps the same flow: pick folders, get a QR
 window, copy the link/password, stop with one click.
 
@@ -86,6 +88,8 @@ stop sharing. Re-opening the app from Finder also brings the window back.
 
 The app is built locally and unsigned — that's why there's no prebuilt
 download.
+
+<br clear="right">
 
 ## How it works
 
