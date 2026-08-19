@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""ftransfer — share one folder over HTTP with Basic Auth.
+"""ftransfer — share one or more folders over HTTP with Basic Auth.
 
 Stdlib only, no dependencies. Meant to sit behind a Cloudflare quick tunnel
 (see start.sh), but works standalone too:
 
-    python3 server.py ~/Downloads --port 8420 --password hunter2
+    python3 server.py ~/Downloads ~/Desktop --port 8420 --password hunter2
+
+With multiple folders, the root URL shows each folder by name.
 """
 
 import argparse
@@ -25,8 +27,10 @@ CHUNK = 256 * 1024
 # no 0/O, 1/l/i — painless to type on a phone keyboard
 PW_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 
-ROOT = ""
+ROOTS = []  # [(display_name, real_path)]
+TITLE = "ftransfer"
 PASSWORD = b""
+INDEX = object()  # sentinel: the virtual root listing when sharing several folders
 
 ICONS = [
     ({"png", "jpg", "jpeg", "gif", "webp", "heic", "svg", "bmp", "tif", "tiff"}, "🖼️"),
@@ -133,14 +137,24 @@ class Handler(BaseHTTPRequestHandler):
         return hmac.compare_digest(password.encode("utf-8"), PASSWORD)
 
     def _resolve(self, url_path):
-        """Map a URL path to a real filesystem path inside ROOT, or None."""
+        """Map a URL path to a real filesystem path inside a shared root,
+        the INDEX sentinel (virtual root of a multi-folder share), or None."""
         path = urllib.parse.unquote(url_path)
         parts = [p for p in path.split("/") if p and p != "."]
         # no traversal, no dotfiles — ever
         if any(p == ".." or p.startswith(".") for p in parts):
             return None
-        real = os.path.realpath(os.path.join(ROOT, *parts))
-        if real != ROOT and not real.startswith(ROOT + os.sep):
+        if len(ROOTS) == 1:
+            base = ROOTS[0][1]
+        else:
+            if not parts:
+                return INDEX
+            base = next((rp for name, rp in ROOTS if name == parts[0]), None)
+            if base is None:
+                return None
+            parts = parts[1:]
+        real = os.path.realpath(os.path.join(base, *parts))
+        if real != base and not real.startswith(base + os.sep):
             return None
         return real
 
@@ -163,6 +177,9 @@ class Handler(BaseHTTPRequestHandler):
         if fs_path is None:
             return self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+        if fs_path is INDEX:
+            return self._send_index()
+
         if os.path.isdir(fs_path):
             if not parsed.path.endswith("/"):
                 self.send_response(HTTPStatus.MOVED_PERMANENTLY)
@@ -177,6 +194,37 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_file(fs_path, force_download)
 
         return self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def _send_html(self, page_bytes):
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page_bytes)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(page_bytes)
+
+    def _send_index(self):
+        rows = []
+        for name, real_path in ROOTS:
+            try:
+                os.stat(real_path)
+            except OSError:
+                continue
+            quoted = urllib.parse.quote(name)
+            rows.append(
+                f'<li><a class="item" href="/{quoted}/">'
+                f'<span class="ic">📁</span>'
+                f'<span class="nm">{escape(name)}<span class="meta">shared folder</span></span>'
+                f'</a></li>'
+            )
+        page = render_page(
+            title=TITLE,
+            crumb="/",
+            body=f'<ul class="files">{"".join(rows)}</ul>',
+            footer=f"ftransfer · {len(rows)} shared folders",
+        ).encode("utf-8", "replace")
+        self._send_html(page)
 
     def _send_listing(self, fs_dir, url_path):
         entries = []
@@ -222,19 +270,12 @@ class Handler(BaseHTTPRequestHandler):
 
         n = len(entries)
         page = render_page(
-            title=os.path.basename(ROOT) or ROOT,
+            title=TITLE,
             crumb=urllib.parse.unquote(url_path),
             body=body,
             footer=f"ftransfer · {n} item{'s' if n != 1 else ''} · tap a name to preview, ↓ to download",
         ).encode("utf-8", "replace")
-
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(page)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(page)
+        self._send_html(page)
 
     def _send_file(self, fs_path, force_download):
         st = os.stat(fs_path)
@@ -288,9 +329,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global ROOT, PASSWORD
-    ap = argparse.ArgumentParser(description="Share one folder over HTTP with Basic Auth.")
-    ap.add_argument("directory", nargs="?", default=".", help="folder to share (default: .)")
+    global ROOTS, TITLE, PASSWORD
+    ap = argparse.ArgumentParser(description="Share folders over HTTP with Basic Auth.")
+    ap.add_argument("directories", nargs="*", default=["."],
+                    help="folder(s) to share (default: .)")
     ap.add_argument("--port", type=int, default=8420, help="port to listen on (0 = any free port)")
     ap.add_argument("--bind", default="127.0.0.1",
                     help="address to listen on (default: 127.0.0.1, tunnel-only)")
@@ -298,9 +340,18 @@ def main():
                     help="access password (default: $FT_PASSWORD or auto-generated)")
     args = ap.parse_args()
 
-    ROOT = os.path.realpath(os.path.expanduser(args.directory))
-    if not os.path.isdir(ROOT):
-        sys.exit(f"error: {ROOT} is not a directory")
+    names = set()
+    for directory in args.directories:
+        real = os.path.realpath(os.path.expanduser(directory))
+        if not os.path.isdir(real):
+            sys.exit(f"error: {real} is not a directory")
+        name = os.path.basename(real).lstrip(".") or "folder"
+        base, i = name, 2
+        while name in names:
+            name, i = f"{base} ({i})", i + 1
+        names.add(name)
+        ROOTS.append((name, real))
+    TITLE = ROOTS[0][0] if len(ROOTS) == 1 else "Shared folders"
 
     password = args.password or "".join(secrets.choice(PW_ALPHABET) for _ in range(10))
     PASSWORD = password.encode("utf-8")
@@ -310,7 +361,8 @@ def main():
     except OSError as e:
         sys.exit(f"error: cannot listen on {args.bind}:{args.port} ({e.strerror})")
 
-    print(f"[ftransfer] sharing   {ROOT}", flush=True)
+    for _, real in ROOTS:
+        print(f"[ftransfer] sharing   {real}", flush=True)
     print(f"[ftransfer] listening http://{args.bind}:{server.server_address[1]}  "
           f"password: {password}", flush=True)
     try:

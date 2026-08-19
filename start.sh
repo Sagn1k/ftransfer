@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# ftransfer — share a folder to your phone via a Cloudflare quick tunnel.
+# ftransfer — share folders to your phone via a Cloudflare quick tunnel.
 #
 # Usage:
-#   ./start.sh                # shares ./shared (created if missing)
-#   ./start.sh ~/Downloads    # shares another folder
+#   ./start.sh                        # shares ./shared (created if missing)
+#   ./start.sh ~/Downloads            # shares another folder
+#   ./start.sh ~/Downloads ~/Desktop  # shares several folders
 #   PORT=9000 FT_PASSWORD=mypass ./start.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
-DIR="${1:-$PWD/shared}"
+if [ $# -eq 0 ]; then
+  mkdir -p "$PWD/shared"
+  set -- "$PWD/shared"
+fi
 PORT="${PORT:-8420}"
 # http2 (TCP) instead of quic (UDP): corporate networks often drop UDP 7844.
 CF_PROTOCOL="${CF_PROTOCOL:-http2}"
@@ -21,10 +25,8 @@ if [ -z "$CF_BIN" ]; then
   exit 1
 fi
 
-mkdir -p "$DIR"
-
 CF_LOG="$(mktemp -t ftransfer-cloudflared)"
-python3 server.py "$DIR" --port "$PORT" --password "$PASSWORD" &
+python3 server.py "$@" --port "$PORT" --password "$PASSWORD" &
 SERVER_PID=$!
 "$CF_BIN" tunnel --url "http://127.0.0.1:$PORT" --protocol "$CF_PROTOCOL" --no-autoupdate >"$CF_LOG" 2>&1 &
 CF_PID=$!
@@ -59,7 +61,7 @@ echo
 echo "   URL       $URL"
 echo "   Username  files   (anything works)"
 echo "   Password  $PASSWORD"
-echo "   Folder    $DIR"
+echo "   Folders   $*"
 echo "  ─────────────────────────────────────────────────────"
 echo
 if command -v qrencode >/dev/null 2>&1; then

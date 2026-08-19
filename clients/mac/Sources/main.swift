@@ -1,6 +1,7 @@
-// ftransfer menu bar app — start/stop sharing a folder to your phone via a
-// Cloudflare quick tunnel. Spawns the bundled server.py plus cloudflared and
-// shows the resulting URL, password, and a scannable QR code.
+// ftransfer menu bar app — share folders to your phone via a Cloudflare quick
+// tunnel. On launch it asks which folders to share, then pops up a QR code
+// window; the 📦 menu bar icon controls it afterwards. Spawns the bundled
+// server.py plus cloudflared.
 
 import AppKit
 import CoreImage
@@ -51,7 +52,7 @@ private final class LineBuffer {
 // MARK: - Share session
 
 private final class ShareSession {
-    let folder: URL
+    let folders: [URL]
     let password = randomPassword()
     var port: Int?
     var url: String?
@@ -61,7 +62,12 @@ private final class ShareSession {
     var tunnelProcess: Process?
     var logTail: [String] = []
 
-    init(folder: URL) { self.folder = folder }
+    init(folders: [URL]) { self.folders = folders }
+
+    var folderSummary: String {
+        folders.count == 1 ? folders[0].lastPathComponent
+                           : "\(folders.count) folders"
+    }
 
     func remember(_ line: String) {
         logTail.append(line)
@@ -91,6 +97,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         rebuildUI()
+        // Go straight into the flow the user expects: pick folders, get a QR.
+        DispatchQueue.main.async { [weak self] in
+            self?.chooseFoldersAndStart(fromLaunch: true)
+        }
+    }
+
+    /// Double-clicking the app in Finder/Dock while it's already running.
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows: Bool) -> Bool {
+        switch state {
+        case .live: showQRWindow()
+        case .idle: chooseFoldersAndStart(fromLaunch: false)
+        case .starting: break
+        }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -100,12 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: UI
 
     private func rebuildUI() {
-        let symbol: String
-        switch state {
-        case .idle: symbol = "shippingbox"
-        case .starting: symbol = "shippingbox"
-        case .live: symbol = "shippingbox.fill"
-        }
+        let symbol = state == .live ? "shippingbox.fill" : "shippingbox"
         statusItem.button?.image = NSImage(systemSymbolName: symbol,
                                            accessibilityDescription: "ftransfer")
         statusItem.button?.appearsDisabled = (state == .starting)
@@ -115,23 +131,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .idle:
             menu.addItem(disabled("Not sharing"))
             menu.addItem(.separator())
-            menu.addItem(item("Start Sharing…", #selector(chooseFolderAndStart), key: "s"))
+            menu.addItem(item("Start Sharing…", #selector(startSharingClicked), key: "s"))
         case .starting:
             menu.addItem(disabled("Starting tunnel…"))
             menu.addItem(.separator())
             menu.addItem(item("Cancel", #selector(stopSharing), key: ""))
         case .live:
-            let name = session?.folder.lastPathComponent ?? "?"
-            menu.addItem(disabled("Sharing “\(name)”"))
+            menu.addItem(disabled("Sharing \(session?.folderSummary ?? "?")"))
+            for folder in (session?.folders ?? []).prefix(5) {
+                menu.addItem(disabled("  📁 \(folder.lastPathComponent)"))
+            }
             if let url = session?.url {
-                let host = url.replacingOccurrences(of: "https://", with: "")
-                menu.addItem(disabled(host))
+                menu.addItem(disabled(url.replacingOccurrences(of: "https://", with: "")))
             }
             menu.addItem(.separator())
             menu.addItem(item("Show QR Code", #selector(showQRWindow), key: "q"))
             menu.addItem(item("Copy Link", #selector(copyLink), key: "c"))
             menu.addItem(item("Copy Password", #selector(copyPassword), key: ""))
-            menu.addItem(item("Open Shared Folder", #selector(openFolder), key: "o"))
+            menu.addItem(item("Open Shared Folder", #selector(openFolders), key: "o"))
             menu.addItem(.separator())
             menu.addItem(item("Stop Sharing", #selector(stopSharing), key: "s"))
         }
@@ -154,20 +171,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Actions
 
-    @objc private func chooseFolderAndStart() {
+    @objc private func startSharingClicked() {
+        chooseFoldersAndStart(fromLaunch: false)
+    }
+
+    private func chooseFoldersAndStart(fromLaunch: Bool) {
+        guard state == .idle else { return }
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = true
         panel.prompt = "Share"
-        panel.message = "Choose the folder to share to your phone."
+        panel.title = "ftransfer"
+        panel.message = "Choose the folder(s) to share to your phone. "
+                      + "Cmd-click to select more than one."
         if let last = UserDefaults.standard.string(forKey: lastFolderKey) {
             panel.directoryURL = URL(fileURLWithPath: last)
         }
-        guard panel.runModal() == .OK, let folder = panel.url else { return }
-        UserDefaults.standard.set(folder.path, forKey: lastFolderKey)
-        startSharing(folder: folder)
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else {
+            if fromLaunch {
+                alert("ftransfer lives in your menu bar",
+                      "Click the 📦 icon in the menu bar (top right) whenever "
+                      + "you want to start or stop sharing.\n\nTip: on MacBooks "
+                      + "with a notch, a crowded menu bar can hide new icons.")
+            }
+            return
+        }
+        UserDefaults.standard.set(panel.urls[0].path, forKey: lastFolderKey)
+        startSharing(folders: panel.urls)
     }
 
     @objc private func stopSharing() {
@@ -190,9 +223,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSPasteboard.general.setString(s.password, forType: .string)
     }
 
-    @objc private func openFolder() {
-        guard let s = session else { return }
-        NSWorkspace.shared.open(s.folder)
+    @objc private func openFolders() {
+        for folder in session?.folders ?? [] {
+            NSWorkspace.shared.open(folder)
+        }
     }
 
     @objc private func quit() {
@@ -201,7 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Start / monitor
 
-    private func startSharing(folder: URL) {
+    private func startSharing(folders: [URL]) {
         guard state == .idle else { return }
         guard let serverScript = Bundle.main.path(forResource: "server", ofType: "py") else {
             alert("Missing server.py", "The app bundle is incomplete — rebuild with build.sh.")
@@ -213,15 +247,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let s = ShareSession(folder: folder)
+        let s = ShareSession(folders: folders)
         session = s
         state = .starting
         rebuildUI()
 
         let server = Process()
         server.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        server.arguments = [serverScript, folder.path, "--port", "0",
-                            "--password", s.password]
+        server.arguments = [serverScript] + folders.map(\.path)
+                         + ["--port", "0", "--password", s.password]
         attach(process: server, to: s, tag: "server") { [weak self] line in
             if s.port == nil,
                let portText = firstMatch(#"listening http://[0-9.]+:([0-9]+)"#, in: line),
@@ -346,14 +380,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let urlField = selectableLabel(url, size: 13, weight: .semibold)
         let pwField = selectableLabel("Password: \(s.password)", size: 13, weight: .regular)
+        let foldersField = selectableLabel(
+            "Sharing: " + s.folders.map(\.lastPathComponent).joined(separator: ", "),
+            size: 11, weight: .regular)
+        foldersField.textColor = .secondaryLabelColor
         let hint = selectableLabel("Scan with the phone camera, sign in with any username.",
                                    size: 11, weight: .regular)
         hint.textColor = .secondaryLabelColor
 
         let copyButton = NSButton(title: "Copy Link", target: self, action: #selector(copyLink))
         copyButton.bezelStyle = .rounded
+        let stopButton = NSButton(title: "Stop Sharing", target: self, action: #selector(stopSharing))
+        stopButton.bezelStyle = .rounded
+        let buttons = NSStackView(views: [copyButton, stopButton])
+        buttons.orientation = .horizontal
+        buttons.spacing = 10
 
-        let stack = NSStackView(views: [qr, urlField, pwField, hint, copyButton])
+        let stack = NSStackView(views: [qr, urlField, pwField, foldersField, hint, buttons])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 10

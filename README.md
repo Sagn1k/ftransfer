@@ -17,7 +17,9 @@ browser — no app to install, no accounts, no same-network requirement.
 
 - **One command** — `./start.sh` prints a public URL, a fresh password, and a
   QR code to scan with your phone camera
-- **Menu bar app** — or click 📦 in the menu bar, pick a folder, scan the QR
+- **Menu bar app** — or open FTransfer.app: pick folders, scan the QR window
+- **Multiple folders** — share several directories at once; the root page
+  lists each one
 - **Password-protected** — HTTPS + Basic Auth with a new random password per run
 - **Download-only** — nothing on the Mac can be modified from the phone
 - **Zero dependencies** — the server is a single stdlib-only Python file;
@@ -55,6 +57,7 @@ file to preview it or **↓** to download. `Ctrl+C` stops sharing.
 
 ```sh
 ./start.sh ~/Downloads               # share any folder
+./start.sh ~/Downloads ~/Desktop     # share several folders at once
 FT_PASSWORD=mypass ./start.sh        # fixed password
 PORT=9000 ./start.sh                 # fixed port
 caffeinate -i ./start.sh             # keep the Mac awake while sharing
@@ -64,7 +67,7 @@ Install `qrencode` (`brew install qrencode`) to get the terminal QR code.
 
 ## Menu bar app
 
-A native macOS menu bar app wraps the same flow: pick a folder, get a QR
+A native macOS menu bar app wraps the same flow: pick folders, get a QR
 window, copy the link/password, stop with one click.
 
 ```sh
@@ -72,9 +75,17 @@ make app                       # builds clients/mac/FTransfer.app (needs Xcode C
 open clients/mac/FTransfer.app
 ```
 
-Click the 📦 icon → **Start Sharing…** → choose a folder. When the tunnel is
-up, a window pops up with the QR code and password. The app is built locally
-and unsigned — that's why there's no prebuilt download.
+On launch the app immediately asks which folder(s) to share (⌘-click to
+select several). Once the tunnel is up, a window pops up with the QR code,
+the password, and a Stop button. Afterwards the app lives in the **menu bar**
+as a 📦 icon (top-right) — click it to show the QR again, copy the link, or
+stop sharing. Re-opening the app from Finder also brings the window back.
+
+> On MacBooks with a notch, a crowded menu bar can hide new icons — if you
+> don't see 📦, close some other menu bar apps or use the app's windows.
+
+The app is built locally and unsigned — that's why there's no prebuilt
+download.
 
 ## How it works
 
