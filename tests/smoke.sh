@@ -13,18 +13,22 @@ printf 'hello world' > "$TMP/root/a.txt"
 printf 'nested' > "$TMP/root/sub/n.txt"
 touch "$TMP/root/.secret"
 
-python3 server.py "$TMP/root" --port 0 --password pw >"$TMP/log" 2>&1 &
+wait_for_port() { # logfile -> port  (30s: cold CI runners start slowly)
+  local log="$1" port=""
+  for _ in $(seq 1 300); do
+    port="$(grep -oE 'listening http://[0-9.]+:[0-9]+' "$log" 2>/dev/null | grep -oE '[0-9]+$' || true)"
+    [ -n "$port" ] && { echo "$port"; return 0; }
+    sleep 0.1
+  done
+  echo "FAIL: server did not start; log follows" >&2
+  cat "$log" >&2 2>/dev/null || echo "(log empty)" >&2
+  return 1
+}
+
+python3 -u server.py "$TMP/root" --port 0 --password pw >"$TMP/log" 2>&1 &
 PID=$!
 
-PORT=""
-for _ in $(seq 1 50); do
-  PORT="$(grep -oE 'listening http://[0-9.]+:[0-9]+' "$TMP/log" 2>/dev/null | grep -oE '[0-9]+$' || true)"
-  [ -n "$PORT" ] && break
-  sleep 0.1
-done
-if [ -z "$PORT" ]; then
-  echo "FAIL: server did not start"; cat "$TMP/log"; exit 1
-fi
+PORT="$(wait_for_port "$TMP/log")" || exit 1
 BASE="http://127.0.0.1:$PORT"
 
 fail=0
@@ -69,17 +73,11 @@ check "zip ignores traversal/dotfiles" "a.txt" "$(zipnames "$TMP/bad.zip")"
 mkdir -p "$TMP/alpha" "$TMP/beta"
 printf 'from alpha' > "$TMP/alpha/one.txt"
 printf 'from beta'  > "$TMP/beta/two.txt"
-python3 server.py "$TMP/alpha" "$TMP/beta" --port 0 --password pw >"$TMP/log2" 2>&1 &
+python3 -u server.py "$TMP/alpha" "$TMP/beta" --port 0 --password pw >"$TMP/log2" 2>&1 &
 PID2=$!
 trap '{ kill "$PID" "$PID2" 2>/dev/null; wait "$PID" "$PID2" 2>/dev/null; } || true; rm -rf "$TMP"' EXIT
 
-PORT2=""
-for _ in $(seq 1 50); do
-  PORT2="$(grep -oE 'listening http://[0-9.]+:[0-9]+' "$TMP/log2" 2>/dev/null | grep -oE '[0-9]+$' || true)"
-  [ -n "$PORT2" ] && break
-  sleep 0.1
-done
-[ -n "$PORT2" ] || { echo "FAIL: multi-root server did not start"; cat "$TMP/log2"; exit 1; }
+PORT2="$(wait_for_port "$TMP/log2")" || exit 1
 B2="http://127.0.0.1:$PORT2"
 
 check "multi: index lists alpha"  alpha "$(curl -s -u u:pw "$B2/" | grep -o 'alpha' | head -1)"
