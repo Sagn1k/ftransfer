@@ -36,9 +36,11 @@ printf 'second root'  > "$TMP/second/two.txt"
 # fixed mtimes so both servers render identical timestamps
 find "$TMP" -exec touch -t 202601021530 {} +
 
+echo "python: $(python3 -V 2>&1) at $(command -v python3 || echo '<not found>')"
+
 wait_for_port() { # logfile -> port
   local log="$1" port=""
-  for _ in $(seq 1 80); do
+  for _ in $(seq 1 300); do   # up to 30s: cold CI runners can be slow
     port="$(grep -oE 'listening http://[0-9.]+:[0-9]+' "$log" 2>/dev/null \
             | grep -oE '[0-9]+$' || true)"
     [ -n "$port" ] && { echo "$port"; return 0; }
@@ -47,13 +49,25 @@ wait_for_port() { # logfile -> port
   return 1
 }
 
+died() { # pid label logfile
+  if kill -0 "$1" 2>/dev/null; then
+    echo "FAIL: $2 server started but never announced a port"
+  else
+    echo "FAIL: $2 server process exited"
+  fi
+  echo "--- $2 log (${3}) ---"
+  cat "$3" 2>/dev/null || echo "(log unreadable)"
+  echo "--- end log ---"
+  exit 1
+}
+
 start_pair() { # args: folders… -> sets PY_PORT / SW_PORT
-  python3 server.py "$@" --port 0 --password pw >"$TMP/py.log" 2>&1 &
+  python3 -u server.py "$@" --port 0 --password pw >"$TMP/py.log" 2>&1 &
   PY_PID=$!
   FT_SERVE_ONLY=1 FT_PASSWORD=pw "$APP_BIN" "$@" >"$TMP/sw.log" 2>&1 &
   SW_PID=$!
-  PY_PORT="$(wait_for_port "$TMP/py.log")" || { echo "FAIL: python server did not start"; cat "$TMP/py.log"; exit 1; }
-  SW_PORT="$(wait_for_port "$TMP/sw.log")" || { echo "FAIL: swift server did not start";  cat "$TMP/sw.log"; exit 1; }
+  PY_PORT="$(wait_for_port "$TMP/py.log")" || died "$PY_PID" python "$TMP/py.log"
+  SW_PORT="$(wait_for_port "$TMP/sw.log")" || died "$SW_PID" swift  "$TMP/sw.log"
 }
 
 fail=0
