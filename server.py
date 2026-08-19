@@ -19,6 +19,7 @@ import secrets
 import sys
 import time
 import urllib.parse
+import zipfile
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -65,7 +66,81 @@ a.dl { flex: none; margin-right: 10px; padding: 8px 14px; border: 1px solid #888
 a.dl:active, a.item:active { background: rgba(127,127,127,.12); }
 .empty { padding: 34px 16px; text-align: center; opacity: .6; }
 footer { margin-top: 14px; font-size: 12.5px; opacity: .45; text-align: center; }
+.toolbar { display: flex; gap: 8px; margin: 0 0 12px; }
+.tbtn { padding: 8px 14px; border: 1px solid #8885; border-radius: 10px; background: none;
+  color: inherit; font: inherit; font-size: 14px; text-decoration: none; cursor: pointer; }
+.tbtn:active { background: rgba(127,127,127,.12); }
+.ck { display: none; flex: none; width: 22px; height: 22px; border: 2px solid #8887;
+  border-radius: 50%; position: relative; }
+body.selecting .ck { display: inline-block; }
+body.selecting a.dl { display: none; }
+li.sel { background: rgba(10,132,255,.10); }
+li.sel .ck { background: #0a84ff; border-color: #0a84ff; }
+li.sel .ck::after { content: "✓"; position: absolute; inset: 0; color: #fff;
+  text-align: center; line-height: 22px; font-size: 14px; font-weight: 700; }
+#bar { display: none; position: fixed; left: 0; right: 0; bottom: 0; gap: 10px;
+  align-items: center; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: Canvas; border-top: 1px solid #8884; }
+body.selecting #bar { display: flex; }
+body.selecting { padding-bottom: 90px; }
+#cnt { flex: 1; opacity: .7; font-size: 14px; }
+.primary { background: #0a84ff; color: #fff; border: none; padding: 10px 18px;
+  border-radius: 12px; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+.primary:disabled { opacity: .4; }
 """
+
+JS = """
+(function () {
+  var selbtn = document.getElementById('selbtn');
+  if (!selbtn) return;
+  var cnt = document.getElementById('cnt');
+  var dl = document.getElementById('dlsel');
+  var picked = {};
+  var n = 0;
+  function upd() {
+    cnt.textContent = n + ' selected';
+    dl.disabled = n === 0;
+  }
+  selbtn.addEventListener('click', function () {
+    document.body.classList.add('selecting');
+    upd();
+  });
+  document.getElementById('cancel').addEventListener('click', function () {
+    document.body.classList.remove('selecting');
+    picked = {}; n = 0;
+    document.querySelectorAll('li.sel').forEach(function (li) {
+      li.classList.remove('sel');
+    });
+  });
+  document.querySelectorAll('li[data-name]').forEach(function (li) {
+    li.querySelector('a.item').addEventListener('click', function (e) {
+      if (!document.body.classList.contains('selecting')) return;
+      e.preventDefault();
+      var name = li.getAttribute('data-name');
+      if (picked[name]) { delete picked[name]; n--; li.classList.remove('sel'); }
+      else { picked[name] = 1; n++; li.classList.add('sel'); }
+      upd();
+    });
+  });
+  dl.addEventListener('click', function () {
+    if (!n) return;
+    var parts = [];
+    for (var k in picked) parts.push('files=' + encodeURIComponent(k));
+    window.location.href = '?zip=1&' + parts.join('&');
+  });
+})();
+"""
+
+TOOLBAR = """<div class="toolbar">
+  <button class="tbtn" id="selbtn" type="button">Select</button>
+  <a class="tbtn" href="?zip=1">⬇ Download all (zip)</a>
+</div>"""
+
+SELECT_BAR = """<div id="bar">
+  <span id="cnt">0 selected</span>
+  <button class="tbtn" id="cancel" type="button">Cancel</button>
+  <button class="primary" id="dlsel" type="button" disabled>Download</button>
+</div>"""
 
 FAVICON = ('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 '
            'viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📦</text></svg>')
@@ -91,7 +166,74 @@ def human_size(n):
             return f"{x:.1f} {unit}"
 
 
-def render_page(title, crumb, body, footer):
+class _ZipStream:
+    """Minimal unseekable write-through so ZipFile streams straight to the
+    socket (zipfile then uses data descriptors instead of seeking back)."""
+
+    def __init__(self, raw):
+        self._raw = raw
+        self._pos = 0
+
+    def write(self, data):
+        self._raw.write(data)
+        self._pos += len(data)
+        return len(data)
+
+    def flush(self):
+        self._raw.flush()
+
+    def tell(self):
+        return self._pos
+
+    def seekable(self):
+        return False
+
+
+def _walk_files(top, prefix):
+    """Yield (arcname, fs_path) for every regular file under top,
+    skipping dotfiles and symlinks."""
+    for root, dirs, files in os.walk(top):
+        dirs[:] = [d for d in dirs
+                   if not d.startswith(".") and not os.path.islink(os.path.join(root, d))]
+        for fname in sorted(files):
+            if fname.startswith("."):
+                continue
+            full = os.path.join(root, fname)
+            if os.path.islink(full):
+                continue
+            rel = os.path.relpath(full, top)
+            yield (f"{prefix}/{rel}" if prefix else rel), full
+
+
+def _zip_entries_for_dir(fs_dir, only_names):
+    """Files to zip from one directory: everything, or just the (top-level)
+    names the client selected. Selected folders are included recursively."""
+    if not only_names:
+        yield from _walk_files(fs_dir, "")
+        return
+    for raw in only_names:
+        name = raw.strip("/")
+        if not name or name == ".." or name.startswith(".") or "/" in name:
+            continue
+        full = os.path.realpath(os.path.join(fs_dir, name))
+        if full != fs_dir and not full.startswith(fs_dir + os.sep):
+            continue
+        if os.path.isfile(full):
+            yield name, full
+        elif os.path.isdir(full):
+            yield from _walk_files(full, name)
+
+
+def _zip_entries_for_index(only_names):
+    """Files to zip from the virtual root of a multi-folder share."""
+    wanted = set(only_names) if only_names else None
+    for name, real_path in ROOTS:
+        if wanted is not None and name not in wanted:
+            continue
+        yield from _walk_files(real_path, name)
+
+
+def render_page(title, crumb, body, footer, toolbar=""):
     return f"""<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
@@ -103,8 +245,11 @@ def render_page(title, crumb, body, footer):
   <h1>📦 {escape(title)}</h1>
   <div class="crumb">{escape(crumb)}</div>
 </header>
+{toolbar}
 {body}
 <footer>{escape(footer)}</footer>
+{SELECT_BAR}
+<script>{JS}</script>
 </html>"""
 
 
@@ -173,27 +318,60 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        want_zip = query.get("zip") == ["1"]
         fs_path = self._resolve(parsed.path)
         if fs_path is None:
             return self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
         if fs_path is INDEX:
+            if want_zip:
+                return self._send_zip("ftransfer.zip",
+                                      _zip_entries_for_index(query.get("files")))
             return self._send_index()
 
         if os.path.isdir(fs_path):
             if not parsed.path.endswith("/"):
+                location = parsed.path + "/"
+                if parsed.query:
+                    location += "?" + parsed.query
                 self.send_response(HTTPStatus.MOVED_PERMANENTLY)
-                self.send_header("Location", parsed.path + "/")
+                self.send_header("Location", location)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            if want_zip:
+                zip_name = (os.path.basename(fs_path.rstrip("/")) or "files") + ".zip"
+                return self._send_zip(zip_name,
+                                      _zip_entries_for_dir(fs_path, query.get("files")))
             return self._send_listing(fs_path, parsed.path)
 
         if os.path.isfile(fs_path):
-            force_download = urllib.parse.parse_qs(parsed.query).get("dl") == ["1"]
-            return self._send_file(fs_path, force_download)
+            return self._send_file(fs_path, query.get("dl") == ["1"])
 
         return self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def _send_zip(self, zip_name, entries):
+        """Stream a zip of (arcname, fs_path) entries. Length is unknown up
+        front, so the body is close-delimited (no Content-Length)."""
+        quoted = urllib.parse.quote(zip_name)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quoted}")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        # ZIP_STORED: shared files are mostly media that won't compress;
+        # storing streams at disk speed instead of burning CPU.
+        with zipfile.ZipFile(_ZipStream(self.wfile), "w",
+                             zipfile.ZIP_STORED, allowZip64=True) as zf:
+            for arcname, full in entries:
+                try:
+                    zf.write(full, arcname)
+                except OSError:
+                    continue
 
     def _send_html(self, page_bytes):
         self.send_response(HTTPStatus.OK)
@@ -213,8 +391,8 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             quoted = urllib.parse.quote(name)
             rows.append(
-                f'<li><a class="item" href="/{quoted}/">'
-                f'<span class="ic">📁</span>'
+                f'<li data-name="{escape(name)}"><a class="item" href="/{quoted}/">'
+                f'<span class="ck"></span><span class="ic">📁</span>'
                 f'<span class="nm">{escape(name)}<span class="meta">shared folder</span></span>'
                 f'</a></li>'
             )
@@ -223,6 +401,7 @@ class Handler(BaseHTTPRequestHandler):
             crumb="/",
             body=f'<ul class="files">{"".join(rows)}</ul>',
             footer=f"ftransfer · {len(rows)} shared folders",
+            toolbar=TOOLBAR if rows else "",
         ).encode("utf-8", "replace")
         self._send_html(page)
 
@@ -254,9 +433,11 @@ class Handler(BaseHTTPRequestHandler):
             when = time.strftime("%b %d, %H:%M", time.localtime(mtime))
             meta = "folder" if is_dir else f"{human_size(size)} · {when}"
             href = quoted + "/" if is_dir else quoted
-            dl_btn = "" if is_dir else f'<a class="dl" href="{quoted}?dl=1" download>↓</a>'
+            dl_btn = ("" if is_dir
+                      else f'<a class="dl" href="{quoted}?dl=1" download>↓</a>')
             rows.append(
-                f'<li><a class="item" href="{href}">'
+                f'<li data-name="{escape(name)}"><a class="item" href="{href}">'
+                f'<span class="ck"></span>'
                 f'<span class="ic">{icon_for(name, is_dir)}</span>'
                 f'<span class="nm">{escape(name)}<span class="meta">{meta}</span></span>'
                 f'</a>{dl_btn}</li>'
@@ -274,6 +455,7 @@ class Handler(BaseHTTPRequestHandler):
             crumb=urllib.parse.unquote(url_path),
             body=body,
             footer=f"ftransfer · {n} item{'s' if n != 1 else ''} · tap a name to preview, ↓ to download",
+            toolbar=TOOLBAR if entries else "",
         ).encode("utf-8", "replace")
         self._send_html(page)
 

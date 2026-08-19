@@ -20,6 +20,8 @@ browser — no app to install, no accounts, no same-network requirement.
 - **Menu bar app** — or open FTransfer.app: pick folders, scan the QR window
 - **Multiple folders** — share several directories at once; the root page
   lists each one
+- **Bulk download** — tap **Select** to pick several files (or folders) and
+  grab them as one .zip, or **Download all** for the entire share
 - **Password-protected** — HTTPS + Basic Auth with a new random password per run
 - **Download-only** — nothing on the Mac can be modified from the phone
 - **Zero dependencies** — the server is a single stdlib-only Python file;
@@ -53,7 +55,9 @@ You'll get:
 ```
 
 Open the URL on the phone, sign in with any username + that password, tap a
-file to preview it or **↓** to download. `Ctrl+C` stops sharing.
+file to preview it or **↓** to download. Use **Select** to multi-pick files
+and folders into one .zip, or **⬇ Download all (zip)** for everything.
+`Ctrl+C` stops sharing.
 
 ```sh
 ./start.sh ~/Downloads               # share any folder
@@ -127,6 +131,7 @@ machines and networks.
 | `cloudflared not found` | `brew install cloudflared` |
 | Downloads stall mid-transfer | The Mac went to sleep — use `caffeinate -i ./start.sh`. |
 | Video won't play inline on iPhone | Use the ↓ button to download it instead (range requests are supported, but codecs vary). |
+| Zip downloads show no total size / progress % | Expected — zips are streamed on the fly, so the size isn't known up front. The download still completes normally. |
 | Need a URL that never changes | Quick tunnels are throwaway by design. Create a free Cloudflare account and a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/), then point it at `http://127.0.0.1:8420`. |
 
 ## Development
